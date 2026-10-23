@@ -1,35 +1,79 @@
 import type { AIAnalysisResult } from "@/types";
 
-const FUNCTION_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-listing`;
-
 export async function generateListing(
   photos: string[],
   geminiKey: string | null
 ): Promise<AIAnalysisResult> {
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-    "Content-Type": "application/json",
-  };
+  const apiKey = geminiKey || import.meta.env.VITE_GEMINI_API_KEY;
 
-  if (geminiKey) {
-    headers["X-Gemini-Key"] = geminiKey;
+  if (!apiKey) {
+    throw new Error("Clé API Gemini manquante. Ajoute ta clé dans les Paramètres.");
   }
 
-  const response = await fetch(FUNCTION_URL, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ photos }),
+  // Préparation des images au format Gemini API
+  const imageParts = photos.map((photo) => {
+    const base64Data = photo.includes(",") ? photo.split(",")[1] : photo;
+    const mimeType = photo.startsWith("data:image/png") ? "image/png" : "image/jpeg";
+    return {
+      inlineData: {
+        data: base64Data,
+        mimeType: mimeType,
+      },
+    };
   });
 
+  const prompt = `
+    Analyse ces images de vêtement pour une fiche Vinted/Resell.
+    Réponds EXCLUSIVEMENT sous la forme d'un objet JSON valide respectant cette structure exacte :
+    {
+      "title": "Titre Vinted optimisé (marque, type, taille, état)",
+      "description": "Description détaillée et attrayante comprenant les détails, les mesures si visibles et l'état.",
+      "brand": "Nom de la marque",
+      "category": "Catégorie du vêtement (ex: Jeans, T-shirt, Sweats...)",
+      "size": "Taille identifiée",
+      "color": "Couleur principale",
+      "condition": "Très bon état",
+      "suggestedPrice": 25,
+      "estimatedProfit": 20,
+      "tags": ["#vintage", "#streetwear", "#levis"]
+    }
+  `;
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [...imageParts, { text: prompt }],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: "application/json",
+        },
+      }),
+    }
+  );
+
   if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
+    const errorData = await response.json().catch(() => ({}));
     throw new Error(
-      data.error || `Erreur lors de la génération (${response.status})`
+      errorData.error?.message || `Erreur lors de la génération (${response.status})`
     );
   }
 
   const data = await response.json();
-  return data as AIAnalysisResult;
+  const textResponse = data.candidates?.[0]?.content?.parts?.[0]?.text;
+
+  if (!textResponse) {
+    throw new Error("Aucune réponse générée par Gemini.");
+  }
+
+  return JSON.parse(textResponse) as AIAnalysisResult;
 }
 
 export function getGeminiKey(): string | null {
