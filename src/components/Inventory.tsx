@@ -4,7 +4,6 @@ import {
   Package,
   Trash2,
   ExternalLink,
-  ChevronRight,
   X,
   Copy,
   Check,
@@ -328,7 +327,7 @@ function ItemDetail({
   onClose: () => void;
   onDelete: (id: string) => void;
   onStatusChange: (id: string, status: ClothingStatus) => void;
-  onCopyListing: () => void;
+  onCopyListing: (item: ClothingItem) => void;
   copied: boolean;
 }) {
   const margin =
@@ -487,7 +486,7 @@ function ItemDetail({
                   Annonce
                 </label>
                 <button
-                  onClick={onCopyListing}
+                  onClick={() => onCopyListing(item)}
                   className={`inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg transition-colors ${
                     copied
                       ? "bg-emerald-50 text-emerald-700"

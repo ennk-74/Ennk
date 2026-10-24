@@ -10,7 +10,6 @@ type View = "home" | "inventory" | "consignes" | "settings";
 function App() {
   const [view, setView] = useState<View>("home");
   const [refreshKey, setRefreshKey] = useState(0);
-  const [itemCount, setItemCount] = useState(0);
 
   const refresh = () => setRefreshKey((k) => k + 1);
 
@@ -73,7 +72,6 @@ function App() {
         {view === "home" && (
           <HomeView
             onSaved={() => {
-              setItemCount((c) => c + 1);
               refresh();
             }}
             onGoToInventory={goToInventory}

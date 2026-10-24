@@ -76,7 +76,7 @@ export function ListingEditor({
     });
   }, [result, sku]);
 
-  const fullListing = buildListingText(edited, sku);
+  const fullListing = buildListingText(edited);
 
   const handleCopy = async () => {
     await navigator.clipboard.writeText(fullListing);
@@ -422,7 +422,6 @@ function buildListingText(
     selling_price: string;
     consignes: string;
   },
-  _sku: string
 ): string {
   const tags = e.hashtags
     .split(",")
