@@ -2,6 +2,7 @@ export type ClothingStatus = "a_verifier" | "annonce_prete" | "en_ligne" | "vend
 
 export interface ClothingItem {
   id: string;
+  user_id: string;
   title: string | null;
   brand: string | null;
   category: string | null;

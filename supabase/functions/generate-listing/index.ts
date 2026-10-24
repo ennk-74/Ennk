@@ -65,25 +65,90 @@ Réponds UNIQUEMENT en JSON valide avec ce format exact:
   "notes": string
 }`;
 
+const GEMINI_MODELS = [
+  "gemini-2.5-flash",
+  "gemini-2.0-flash",
+  "gemini-flash-latest",
+];
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 8192;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode.apply(null, Array.from(chunk));
+  }
+  return btoa(binary);
+}
+
+function validateResult(raw: unknown): AnalysisResult {
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error("invalid response");
+  }
+  const obj = raw as Record<string, unknown>;
+
+  const strOrNull = (v: unknown): string | null =>
+    typeof v === "string" && v.trim() ? v.trim() : null;
+
+  const numOrNull = (v: unknown): number | null =>
+    typeof v === "number" && !isNaN(v) ? v : null;
+
+  const hashtags: string[] = Array.isArray(obj.hashtags)
+    ? obj.hashtags.filter((h): h is string => typeof h === "string" && h.trim().length > 0)
+    : [];
+
+  const confidence = obj.confidence;
+  const validConfidence =
+    confidence === "bas" || confidence === "moyen" || confidence === "eleve"
+      ? confidence
+      : "bas";
+
+  return {
+    brand: strOrNull(obj.brand),
+    category: strOrNull(obj.category),
+    model: strOrNull(obj.model),
+    size: strOrNull(obj.size),
+    color: strOrNull(obj.color),
+    material: strOrNull(obj.material),
+    condition: strOrNull(obj.condition),
+    defects: strOrNull(obj.defects),
+    vinted_title:
+      typeof obj.vinted_title === "string" && obj.vinted_title.trim()
+        ? obj.vinted_title.trim()
+        : "Vêtement seconde main",
+    description:
+      typeof obj.description === "string" ? obj.description.trim() : "",
+    hashtags,
+    suggested_price: numOrNull(obj.suggested_price),
+    confidence: validConfidence,
+    notes: typeof obj.notes === "string" ? obj.notes : "",
+  };
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
   }
 
   try {
-    const { photos } = await req.json();
+    const body = await req.json();
+    const photos: unknown = body?.photos;
 
-    if (!photos || !Array.isArray(photos) || photos.length === 0) {
+    if (!Array.isArray(photos) || photos.length === 0) {
       return new Response(
         JSON.stringify({ error: "Aucune photo fournie." }),
-        {
-          status: 400,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        }
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // Try server-side key first, then fall back to client-provided key in header
+    if (photos.length > 6) {
+      return new Response(
+        JSON.stringify({ error: "Maximum 6 photos par analyse." }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     const serverKey = Deno.env.get("GEMINI_API_KEY");
     const clientKey = req.headers.get("X-Gemini-Key");
     const apiKey = serverKey || clientKey;
@@ -91,54 +156,52 @@ Deno.serve(async (req: Request) => {
     if (!apiKey) {
       return new Response(
         JSON.stringify({
-          error:
-            "Aucune clé API Gemini configurée. Allez dans les Paramètres pour ajouter votre clé.",
+          error: "Aucune clé API Gemini configurée. Allez dans les Paramètres pour ajouter votre clé.",
         }),
-        {
-          status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        }
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    // Build the parts for Gemini: text prompt + image parts
     const parts: Array<
       { text: string } | { inline_data: { mime_type: string; data: string } }
     > = [{ text: SYSTEM_PROMPT }];
 
     for (const photo of photos) {
-      if (typeof photo === "string" && photo.startsWith("data:")) {
+      if (typeof photo !== "string") continue;
+      if (photo.startsWith("data:")) {
         const match = photo.match(/^data:(image\/\w+);base64,(.+)$/);
         if (match) {
-          parts.push({
-            inline_data: {
-              mime_type: match[1],
-              data: match[2],
-            },
-          });
+          parts.push({ inline_data: { mime_type: match[1], data: match[2] } });
         }
-      } else if (typeof photo === "string") {
-        const imgResponse = await fetch(photo);
-        if (imgResponse.ok) {
-          const buffer = await imgResponse.arrayBuffer();
-          const base64 = btoa(
-            String.fromCharCode(...new Uint8Array(buffer))
-          );
-          const contentType =
-            imgResponse.headers.get("content-type") || "image/jpeg";
-          parts.push({
-            inline_data: {
-              mime_type: contentType,
-              data: base64,
-            },
-          });
+      } else {
+        try {
+          const imgResponse = await fetch(photo);
+          if (imgResponse.ok) {
+            const buffer = await imgResponse.arrayBuffer();
+            const base64 = arrayBufferToBase64(buffer);
+            const contentType = imgResponse.headers.get("content-type") || "image/jpeg";
+            parts.push({ inline_data: { mime_type: contentType, data: base64 } });
+          }
+        } catch {
+          // skip unreachable photo
         }
       }
     }
 
-    const geminiResponse = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-      {
+    if (parts.length <= 1) {
+      return new Response(
+        JSON.stringify({ error: "Aucune photo valide n'a pu être traitée." }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    let geminiResponse: Response | null = null;
+    let lastError: string | null = null;
+
+    for (const modelName of GEMINI_MODELS) {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
+
+      geminiResponse = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -149,67 +212,77 @@ Deno.serve(async (req: Request) => {
             responseMimeType: "application/json",
           },
         }),
-      }
-    );
+      });
 
-    if (!geminiResponse.ok) {
+      if (geminiResponse.ok) break;
+
+      if (geminiResponse.status === 404) {
+        lastError = "Modèle Gemini indisponible.";
+        continue;
+      }
+
       const errorText = await geminiResponse.text();
       let errorMessage = "Erreur de l'API Gemini.";
 
       if (geminiResponse.status === 429) {
-        errorMessage =
-          "Quota de l'API Gemini atteint. Réessayez plus tard ou vérifiez votre plan.";
+        errorMessage = "Quota de l'API Gemini atteint. Réessayez plus tard ou vérifiez votre plan.";
       } else if (geminiResponse.status === 403) {
-        errorMessage =
-          "Clé API Gemini invalide ou non autorisée. Vérifiez votre clé dans les Paramètres.";
+        errorMessage = "Clé API Gemini invalide ou non autorisée. Vérifiez votre clé dans les Paramètres.";
       } else if (geminiResponse.status === 400) {
-        errorMessage =
-          "Requête invalide vers l'API Gemini. Les photos sont peut-être trop lourdes.";
+        errorMessage = "Requête invalide vers l'API Gemini. Les photos sont peut-être trop lourdes.";
       }
 
-      console.error("Gemini API error:", errorText);
+      console.error(`Gemini API error (${modelName}):`, errorText);
       return new Response(
         JSON.stringify({ error: errorMessage }),
-        {
-          status: geminiResponse.status,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        }
+        { status: geminiResponse.status, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    if (!geminiResponse || !geminiResponse.ok) {
+      return new Response(
+        JSON.stringify({ error: lastError || "Aucun modèle Gemini disponible." }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
     const geminiData = await geminiResponse.json();
-    const textContent =
-      geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const textContent = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text;
 
     if (!textContent) {
+      const finishReason = geminiData?.candidates?.[0]?.finishReason;
       return new Response(
         JSON.stringify({
-          error: "L'IA n'a pas pu analyser les photos. Réessayez.",
+          error: finishReason === "SAFETY"
+            ? "L'IA a refusé d'analyser ces photos. Essayez d'autres images."
+            : "L'IA n'a pas pu analyser les photos. Réessayez.",
         }),
-        {
-          status: 500,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        }
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    let result: AnalysisResult;
+    let parsed: unknown;
     try {
-      result = JSON.parse(textContent);
+      parsed = JSON.parse(textContent);
     } catch {
       const jsonMatch = textContent.match(/\{[\s\S]*\}/);
       if (!jsonMatch) {
         return new Response(
-          JSON.stringify({
-            error: "Format de réponse IA invalide. Réessayez.",
-          }),
-          {
-            status: 500,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          }
+          JSON.stringify({ error: "Format de réponse IA invalide. Réessayez." }),
+          { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
         );
       }
-      result = JSON.parse(jsonMatch[0]);
+      parsed = JSON.parse(jsonMatch[0]);
+    }
+
+    let result: AnalysisResult;
+    try {
+      result = validateResult(parsed);
+    } catch {
+      return new Response(
+        JSON.stringify({ error: "Réponse IA incohérente. Réessayez." }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
     }
 
     return new Response(JSON.stringify(result), {
@@ -219,13 +292,8 @@ Deno.serve(async (req: Request) => {
   } catch (err) {
     console.error("Edge function error:", err);
     return new Response(
-      JSON.stringify({
-        error: "Une erreur inattendue est survenue. Réessayez.",
-      }),
-      {
-        status: 500,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
+      JSON.stringify({ error: "Une erreur inattendue est survenue. Réessayez." }),
+      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
 });

@@ -59,15 +59,32 @@ export function getBrandPrefix(brand: string | null): string {
 export async function generateSku(brand: string | null): Promise<string> {
   const prefix = getBrandPrefix(brand);
 
-  let count = 0;
-  if (brand) {
-    const { count: exactCount } = await supabase
+  // Query all SKUs for the current user with this prefix, then find the max number.
+  // This prevents duplicates even if items were deleted.
+  const { data, error } = await supabase
+    .from("clothing_items")
+    .select("sku")
+    .not("sku", "is", null)
+    .ilike("sku", `${prefix}-%`);
+
+  if (error) {
+    // Fallback: use count
+    const { count } = await supabase
       .from("clothing_items")
-      .select("id", { count: "exact", head: true })
-      .ilike("brand", brand);
-    count = exactCount || 0;
+      .select("id", { count: "exact", head: true });
+    return `${prefix}-${(count || 0) + 1}`;
   }
 
-  const number = count + 1;
-  return `${prefix}-${number}`;
+  let maxNumber = 0;
+  for (const row of data || []) {
+    const sku = row.sku as string | null;
+    if (!sku) continue;
+    const match = sku.match(/^.+-(\d+)$/);
+    if (match) {
+      const num = parseInt(match[1], 10);
+      if (num > maxNumber) maxNumber = num;
+    }
+  }
+
+  return `${prefix}-${maxNumber + 1}`;
 }

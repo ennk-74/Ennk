@@ -1,13 +1,16 @@
 import { useState, useEffect } from "react";
-import { Shirt, Sparkles, Package, Settings as SettingsIcon, ClipboardList, Upload } from "lucide-react";
+import { Shirt, Sparkles, Package, Settings as SettingsIcon, ClipboardList, Upload, LogOut } from "lucide-react";
 import { AddPhotos } from "@/components/AddPhotos";
 import { Inventory } from "@/components/Inventory";
 import { Settings } from "@/components/Settings";
 import { Consignes } from "@/components/Consignes";
+import { AuthPage } from "@/components/AuthPage";
+import { useAuth } from "@/lib/auth";
 
 type View = "home" | "inventory" | "consignes" | "settings";
 
 function App() {
+  const { user, loading, signOut } = useAuth();
   const [view, setView] = useState<View>("home");
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -19,14 +22,31 @@ function App() {
     }
   }, [view]);
 
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-stone-50 flex items-center justify-center">
+        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary-500 to-primary-700 flex items-center justify-center animate-pulse">
+          <Shirt className="w-5 h-5 text-white" />
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthPage />;
+  }
+
   const goToHome = () => setView("home");
   const goToInventory = () => setView("inventory");
   const goToConsignes = () => setView("consignes");
   const goToSettings = () => setView("settings");
 
+  const handleSignOut = async () => {
+    await signOut();
+  };
+
   return (
     <div className="min-h-screen bg-stone-50 flex flex-col">
-      {/* Header */}
       <header className="sticky top-0 z-40 bg-white/80 backdrop-blur-md border-b border-stone-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-14 flex items-center justify-between">
           <button onClick={goToHome} className="flex items-center gap-2 group">
@@ -38,52 +58,33 @@ function App() {
             </span>
           </button>
 
-          <nav className="flex items-center gap-1">
-            <NavButton
-              active={view === "home"}
-              onClick={goToHome}
-              icon={<Sparkles className="w-4 h-4" />}
-              label="Générer"
-            />
-            <NavButton
-              active={view === "inventory"}
-              onClick={goToInventory}
-              icon={<Package className="w-4 h-4" />}
-              label="Stock"
-            />
-            <NavButton
-              active={view === "consignes"}
-              onClick={goToConsignes}
-              icon={<ClipboardList className="w-4 h-4" />}
-              label="Consignes"
-            />
-            <NavButton
-              active={view === "settings"}
-              onClick={goToSettings}
-              icon={<SettingsIcon className="w-4 h-4" />}
-              label="Paramètres"
-            />
-          </nav>
+          <div className="flex items-center gap-1">
+            <nav className="flex items-center gap-1">
+              <NavButton active={view === "home"} onClick={goToHome} icon={<Sparkles className="w-4 h-4" />} label="Générer" />
+              <NavButton active={view === "inventory"} onClick={goToInventory} icon={<Package className="w-4 h-4" />} label="Stock" />
+              <NavButton active={view === "consignes"} onClick={goToConsignes} icon={<ClipboardList className="w-4 h-4" />} label="Consignes" />
+              <NavButton active={view === "settings"} onClick={goToSettings} icon={<SettingsIcon className="w-4 h-4" />} label="Paramètres" />
+            </nav>
+            <button
+              onClick={handleSignOut}
+              title="Déconnexion"
+              className="ml-2 w-8 h-8 rounded-lg flex items-center justify-center text-stone-500 hover:bg-stone-100 hover:text-red-600 transition-colors"
+            >
+              <LogOut className="w-4 h-4" />
+            </button>
+          </div>
         </div>
       </header>
 
-      {/* Main content */}
       <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 py-8">
         {view === "home" && (
-          <HomeView
-            onSaved={() => {
-              refresh();
-            }}
-            onGoToInventory={goToInventory}
-            refreshKey={refreshKey}
-          />
+          <HomeView onSaved={refresh} onGoToInventory={goToInventory} refreshKey={refreshKey} />
         )}
         {view === "inventory" && <Inventory refreshKey={refreshKey} />}
         {view === "consignes" && <Consignes />}
         {view === "settings" && <Settings />}
       </main>
 
-      {/* Footer */}
       <footer className="border-t border-stone-200 bg-white">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex items-center justify-between text-xs text-stone-400">
           <span>StyleStock AI — Gestion de stock de seconde main</span>
@@ -131,7 +132,6 @@ function HomeView({
 }) {
   return (
     <div className="space-y-8">
-      {/* Hero */}
       <div className="text-center max-w-2xl mx-auto pt-4">
         <h1 className="text-3xl sm:text-4xl font-bold text-stone-800 tracking-tight">
           Transformez vos photos en annonces
@@ -143,15 +143,12 @@ function HomeView({
         </p>
       </div>
 
-      {/* Big add button */}
       <div className="flex flex-col items-center">
         <BigAddButton />
       </div>
 
-      {/* Photo upload + generation flow */}
       <AddPhotos onSaved={onSaved} />
 
-      {/* Quick inventory preview */}
       <div>
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-semibold text-stone-700">
@@ -172,10 +169,7 @@ function HomeView({
 
 function BigAddButton() {
   return (
-    <label
-      htmlFor="photo-input-home"
-      className="cursor-pointer group"
-    >
+    <label htmlFor="photo-input-home" className="cursor-pointer group">
       <div className="w-48 h-48 rounded-full bg-gradient-to-br from-primary-500 to-primary-700 flex flex-col items-center justify-center shadow-xl shadow-primary-200 group-hover:scale-105 transition-transform duration-300">
         <Upload className="w-12 h-12 text-white mb-2" />
         <span className="text-white font-semibold text-lg">
@@ -194,7 +188,6 @@ function BigAddButton() {
         onChange={() => {
           const input = document.getElementById("photo-input-home") as HTMLInputElement;
           if (input.files && input.files.length > 0) {
-            // Forward files to the AddPhotos component by simulating drop
             const dt = new DataTransfer();
             Array.from(input.files).forEach((f) => dt.items.add(f));
             const addPhotosInput = document.getElementById("photo-input") as HTMLInputElement;

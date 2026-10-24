@@ -14,9 +14,26 @@ import { supabase } from "@/lib/supabase";
 import type { ClothingItem, ClothingStatus } from "@/types";
 import { STATUS_LABELS, STATUS_COLORS } from "@/types";
 
+const BUCKET = "clothing-photos";
+
+async function getSignedUrls(paths: string[]): Promise<Record<string, string>> {
+  if (paths.length === 0) return {};
+  const { data, error } = await supabase.storage
+    .from(BUCKET)
+    .createSignedUrls(paths, 3600);
+
+  if (error || !data) return {};
+  const map: Record<string, string> = {};
+  for (const item of data) {
+    if (item.signedUrl) {
+      map[item.path] = item.signedUrl;
+    }
+  }
+  return map;
+}
+
 interface InventoryProps {
   refreshKey: number;
-  onEditItem?: (item: ClothingItem) => void;
 }
 
 export function Inventory({ refreshKey }: InventoryProps) {
@@ -26,6 +43,7 @@ export function Inventory({ refreshKey }: InventoryProps) {
   const [statusFilter, setStatusFilter] = useState<ClothingStatus | "all">("all");
   const [selected, setSelected] = useState<ClothingItem | null>(null);
   const [copied, setCopied] = useState(false);
+  const [photoUrls, setPhotoUrls] = useState<Record<string, string>>({});
 
   const fetchItems = useCallback(async () => {
     setLoading(true);
@@ -45,6 +63,32 @@ export function Inventory({ refreshKey }: InventoryProps) {
   useEffect(() => {
     fetchItems();
   }, [fetchItems, refreshKey]);
+
+  const allPhotoPaths = useMemo(() => {
+    const paths: string[] = [];
+    for (const item of items) {
+      if (item.photos) {
+        for (const p of item.photos) {
+          if (!p.startsWith("http")) paths.push(p);
+        }
+      }
+    }
+    return paths;
+  }, [items]);
+
+  useEffect(() => {
+    if (allPhotoPaths.length === 0) return;
+    let cancelled = false;
+    getSignedUrls(allPhotoPaths).then((urls) => {
+      if (!cancelled) setPhotoUrls(urls);
+    });
+    return () => { cancelled = true; };
+  }, [allPhotoPaths]);
+
+  const getPhotoUrl = (path: string): string => {
+    if (path.startsWith("http")) return path;
+    return photoUrls[path] || "";
+  };
 
   const filtered = useMemo(() => {
     return items.filter((item) => {
@@ -115,7 +159,6 @@ export function Inventory({ refreshKey }: InventoryProps) {
 
   return (
     <div className="animate-fade-in">
-      {/* Toolbar */}
       <div className="flex flex-col sm:flex-row gap-3 mb-6">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-400" />
@@ -150,7 +193,6 @@ export function Inventory({ refreshKey }: InventoryProps) {
         </div>
       </div>
 
-      {/* Status summary */}
       <div className="flex gap-2 mb-6 flex-wrap">
         <StatusPill
           label="Total"
@@ -169,7 +211,6 @@ export function Inventory({ refreshKey }: InventoryProps) {
         ))}
       </div>
 
-      {/* Grid */}
       {loading ? (
         <div className="flex items-center justify-center py-20">
           <Package className="w-8 h-8 text-stone-300 animate-pulse" />
@@ -196,16 +237,17 @@ export function Inventory({ refreshKey }: InventoryProps) {
             <ClothingCard
               key={item.id}
               item={item}
+              photoUrl={item.photos?.[0] ? getPhotoUrl(item.photos[0]) : ""}
               onClick={() => setSelected(item)}
             />
           ))}
         </div>
       )}
 
-      {/* Detail drawer */}
       {selected && (
         <ItemDetail
           item={selected}
+          photoUrls={photoUrls}
           onClose={() => setSelected(null)}
           onDelete={handleDelete}
           onStatusChange={handleStatusChange}
@@ -251,12 +293,13 @@ function StatusPill({
 
 function ClothingCard({
   item,
+  photoUrl,
   onClick,
 }: {
   item: ClothingItem;
+  photoUrl: string;
   onClick: () => void;
 }) {
-  const photo = item.photos?.[0];
   const margin =
     item.selling_price != null && item.purchase_price != null
       ? item.selling_price - item.purchase_price
@@ -268,9 +311,9 @@ function ClothingCard({
       className="group bg-white rounded-xl border border-stone-200 overflow-hidden hover:shadow-lg hover:border-stone-300 transition-all text-left"
     >
       <div className="aspect-square bg-stone-100 overflow-hidden relative">
-        {photo ? (
+        {photoUrl ? (
           <img
-            src={photo}
+            src={photoUrl}
             alt={item.title || "Vêtement"}
             className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
           />
@@ -317,6 +360,7 @@ function ClothingCard({
 
 function ItemDetail({
   item,
+  photoUrls,
   onClose,
   onDelete,
   onStatusChange,
@@ -324,6 +368,7 @@ function ItemDetail({
   copied,
 }: {
   item: ClothingItem;
+  photoUrls: Record<string, string>;
   onClose: () => void;
   onDelete: (id: string) => void;
   onStatusChange: (id: string, status: ClothingStatus) => void;
@@ -334,6 +379,11 @@ function ItemDetail({
     item.selling_price != null && item.purchase_price != null
       ? item.selling_price - item.purchase_price
       : null;
+
+  const getPhotoUrl = (path: string): string => {
+    if (path.startsWith("http")) return path;
+    return photoUrls[path] || "";
+  };
 
   return (
     <div
@@ -364,39 +414,39 @@ function ItemDetail({
         </div>
 
         <div className="p-5 space-y-5">
-          {/* Photos */}
           {item.photos && item.photos.length > 0 && (
             <div className="flex gap-2 overflow-x-auto pb-1">
-              {item.photos.map((photo, i) => (
-                <a
-                  key={i}
-                  href={photo}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex-shrink-0 relative group"
-                >
-                  <img
-                    src={photo}
-                    alt={`Photo ${i + 1}`}
-                    className="w-24 h-24 rounded-lg object-cover"
-                  />
-                  <div className="absolute inset-0 rounded-lg bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center">
-                    <ExternalLink className="w-4 h-4 text-white opacity-0 group-hover:opacity-100 transition-opacity" />
-                  </div>
-                </a>
-              ))}
+              {item.photos.map((photo, i) => {
+                const url = getPhotoUrl(photo);
+                if (!url) return null;
+                return (
+                  <a
+                    key={i}
+                    href={url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex-shrink-0 relative group"
+                  >
+                    <img
+                      src={url}
+                      alt={`Photo ${i + 1}`}
+                      className="w-24 h-24 rounded-lg object-cover"
+                    />
+                    <div className="absolute inset-0 rounded-lg bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center">
+                      <ExternalLink className="w-4 h-4 text-white opacity-0 group-hover:opacity-100 transition-opacity" />
+                    </div>
+                  </a>
+                );
+              })}
             </div>
           )}
 
-          {/* Status selector */}
           <div>
             <label className="block text-xs font-medium text-stone-500 mb-2">
               Statut
             </label>
             <div className="flex flex-wrap gap-2">
-              {(
-                Object.keys(STATUS_LABELS) as ClothingStatus[]
-              ).map((s) => (
+              {(Object.keys(STATUS_LABELS) as ClothingStatus[]).map((s) => (
                 <button
                   key={s}
                   onClick={() => onStatusChange(item.id, s)}
@@ -412,7 +462,6 @@ function ItemDetail({
             </div>
           </div>
 
-          {/* SKU */}
           {item.sku && (
             <div className="bg-primary-50 rounded-lg px-3 py-2">
               <p className="text-xs text-primary-400">Référence (SKU)</p>
@@ -422,7 +471,6 @@ function ItemDetail({
             </div>
           )}
 
-          {/* Info grid */}
           <div className="grid grid-cols-2 gap-3">
             <InfoRow label="Marque" value={item.brand} />
             <InfoRow label="Catégorie" value={item.category} />
@@ -434,7 +482,6 @@ function ItemDetail({
             <InfoRow label="Défauts" value={item.defects} />
           </div>
 
-          {/* Prices */}
           <div className="grid grid-cols-3 gap-3">
             <div className="bg-stone-50 rounded-lg p-3 text-center">
               <p className="text-xs text-stone-400">Prix d'achat</p>
@@ -454,9 +501,7 @@ function ItemDetail({
             </div>
             <div
               className={`rounded-lg p-3 text-center ${
-                margin != null
-                  ? "bg-emerald-50"
-                  : "bg-stone-50"
+                margin != null ? "bg-emerald-50" : "bg-stone-50"
               }`}
             >
               <p className="text-xs text-stone-400">Marge</p>
@@ -470,7 +515,6 @@ function ItemDetail({
             </div>
           </div>
 
-          {/* AI notes */}
           {item.ai_notes && (
             <div className="flex items-start gap-2 bg-blue-50 border border-blue-200 rounded-lg px-4 py-3">
               <AlertTriangle className="w-4 h-4 text-blue-500 flex-shrink-0 mt-0.5" />
@@ -478,7 +522,6 @@ function ItemDetail({
             </div>
           )}
 
-          {/* Listing */}
           {item.description && (
             <div>
               <div className="flex items-center justify-between mb-2">
@@ -510,7 +553,6 @@ function ItemDetail({
             </div>
           )}
 
-          {/* Hashtags */}
           {item.hashtags && item.hashtags.length > 0 && (
             <div className="flex flex-wrap gap-1.5">
               {item.hashtags.map((tag, i) => (
@@ -524,7 +566,6 @@ function ItemDetail({
             </div>
           )}
 
-          {/* Delete */}
           <div className="pt-3 border-t border-stone-100">
             <button
               onClick={() => onDelete(item.id)}

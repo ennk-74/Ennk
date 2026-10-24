@@ -1,12 +1,14 @@
 import { useState, useCallback } from "react";
 import { Upload, X, ImageIcon, Sparkles, Loader2, AlertCircle } from "lucide-react";
-import { compressImage } from "@/lib/image";
+import { compressImage, dataUrlToBlob } from "@/lib/image";
 import { generateListing, getGeminiKey } from "@/lib/ai";
 import { supabase } from "@/lib/supabase";
-import { dataUrlToBlob } from "@/lib/image";
 import { generateSku } from "@/lib/sku";
+import { useAuth } from "@/lib/auth";
 import type { AIAnalysisResult, ClothingItem } from "@/types";
 import { ListingEditor } from "./ListingEditor";
+
+const MAX_PHOTOS = 6;
 
 interface AddPhotosProps {
   onSaved: () => void;
@@ -15,6 +17,7 @@ interface AddPhotosProps {
 type Phase = "upload" | "analyzing" | "result";
 
 export function AddPhotos({ onSaved }: AddPhotosProps) {
+  const { user } = useAuth();
   const [phase, setPhase] = useState<Phase>("upload");
   const [photos, setPhotos] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -26,9 +29,21 @@ export function AddPhotos({ onSaved }: AddPhotosProps) {
     if (!files || files.length === 0) return;
     setError(null);
 
+    const remaining = MAX_PHOTOS - photos.length;
+    if (remaining <= 0) {
+      setError(`Maximum ${MAX_PHOTOS} photos par vêtement.`);
+      return;
+    }
+
+    const allImageFiles = Array.from(files).filter((f) => f.type.startsWith("image/"));
+    const fileArray = allImageFiles.slice(0, remaining);
+
+    if (allImageFiles.length > remaining) {
+      setError(`Maximum ${MAX_PHOTOS} photos par vêtement. Seules les ${fileArray.length} premières ont été ajoutées.`);
+    }
+
     const compressed: string[] = [];
-    for (const file of Array.from(files)) {
-      if (!file.type.startsWith("image/")) continue;
+    for (const file of fileArray) {
       try {
         const dataUrl = await compressImage(file);
         compressed.push(dataUrl);
@@ -37,7 +52,7 @@ export function AddPhotos({ onSaved }: AddPhotosProps) {
       }
     }
     setPhotos((prev) => [...prev, ...compressed]);
-  }, []);
+  }, [photos.length]);
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
@@ -50,6 +65,7 @@ export function AddPhotos({ onSaved }: AddPhotosProps) {
 
   const removePhoto = (index: number) => {
     setPhotos((prev) => prev.filter((_, i) => i !== index));
+    setError(null);
   };
 
   const handleGenerate = async () => {
@@ -61,7 +77,6 @@ export function AddPhotos({ onSaved }: AddPhotosProps) {
       const key = getGeminiKey();
       const aiResult = await generateListing(photos, key);
       setResult(aiResult);
-      // Generate SKU based on identified brand and existing stock count
       const generatedSku = await generateSku(aiResult.brand);
       setSku(generatedSku);
       setPhase("result");
@@ -102,31 +117,53 @@ export function AddPhotos({ onSaved }: AddPhotosProps) {
 
     if (insertError) throw insertError;
 
-    // Upload photos to storage
-    if (data && photos.length > 0) {
-      const photoUrls: string[] = [];
+    if (data && photos.length > 0 && user) {
+      const photoPaths: string[] = [];
+      const uploadErrors: string[] = [];
+
       for (let i = 0; i < photos.length; i++) {
         try {
           const blob = dataUrlToBlob(photos[i]);
-          const path = `${data.id}/${i}.jpg`;
+          const path = `${user.id}/${data.id}/${i}.jpg`;
           const { error: upErr } = await supabase.storage
             .from("clothing-photos")
             .upload(path, blob, { contentType: "image/jpeg", upsert: true });
-          if (!upErr) {
-            const { data: urlData } = supabase.storage
-              .from("clothing-photos")
-              .getPublicUrl(path);
-            photoUrls.push(urlData.publicUrl);
+
+          if (upErr) {
+            uploadErrors.push(`Photo ${i + 1}: ${upErr.message}`);
+          } else {
+            photoPaths.push(path);
           }
-        } catch {
-          // skip failed upload
+        } catch (e) {
+          uploadErrors.push(
+            `Photo ${i + 1}: ${e instanceof Error ? e.message : "erreur inconnue"}`
+          );
         }
       }
-      if (photoUrls.length > 0) {
-        await supabase
+
+      if (photoPaths.length > 0) {
+        const { error: updateErr } = await supabase
           .from("clothing_items")
-          .update({ photos: photoUrls })
+          .update({ photos: photoPaths })
           .eq("id", data.id);
+
+        if (updateErr) {
+          throw new Error(
+            `Vêtement enregistré mais erreur lors de la sauvegarde des photos: ${updateErr.message}`
+          );
+        }
+      }
+
+      if (uploadErrors.length > 0) {
+        if (photoPaths.length === 0) {
+          throw new Error(
+            `Aucune photo n'a pu être sauvegardée. Le vêtement est enregistré sans photos. Erreurs: ${uploadErrors.join(", ")}`
+          );
+        } else {
+          throw new Error(
+            `Vêtement enregistré avec ${photoPaths.length}/${photos.length} photos. Erreurs: ${uploadErrors.join(", ")}`
+          );
+        }
       }
     }
 
@@ -206,7 +243,7 @@ export function AddPhotos({ onSaved }: AddPhotosProps) {
             Déposez vos photos ici
           </p>
           <p className="mt-1 text-sm text-stone-400">
-            ou cliquez pour parcourir — plusieurs photos recommandées
+            ou cliquez pour parcourir — jusqu'à {MAX_PHOTOS} photos
           </p>
         </label>
       </div>
@@ -248,6 +285,12 @@ export function AddPhotos({ onSaved }: AddPhotosProps) {
             <p className="text-sm text-stone-500">
               {photos.length} photo{photos.length > 1 ? "s" : ""} prête
               {photos.length > 1 ? "s" : ""}
+              {photos.length < MAX_PHOTOS && (
+                <span className="text-stone-400">
+                  {" "}
+                  · {MAX_PHOTOS - photos.length} restante{MAX_PHOTOS - photos.length > 1 ? "s" : ""}
+                </span>
+              )}
             </p>
             <button
               onClick={handleGenerate}
@@ -263,7 +306,7 @@ export function AddPhotos({ onSaved }: AddPhotosProps) {
       {photos.length === 0 && (
         <div className="mt-8 flex items-center justify-center gap-2 text-sm text-stone-400">
           <ImageIcon className="w-4 h-4" />
-          <span>Astuce : 3 à 5 photos donnent les meilleurs résultats</span>
+          <span>Astuce : 3 à 6 photos donnent les meilleurs résultats</span>
         </div>
       )}
 
